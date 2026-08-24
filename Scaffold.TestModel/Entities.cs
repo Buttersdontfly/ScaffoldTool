@@ -1,0 +1,221 @@
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+// [Owned] and [Precision] are EF Core attributes and live here, not in the
+// DataAnnotations namespaces.
+using Microsoft.EntityFrameworkCore;
+
+namespace Scaffold.TestModel;
+
+// Every shape here exists to exercise one generator decision. If you add a case
+// to the generator, add the entity property that triggers it here first --
+// that is what stops the tool being tuned to one project's schema.
+
+// --- requiredness and template selection by name and attribute --------------
+
+public class Author
+{
+    public int AuthorId { get; set; }
+
+    // = null! -> [Required]
+    [MaxLength(100)]
+    public string Name { get; set; } = null!;
+
+    // = string.Empty -> NOT required, despite EF marking the column non-nullable
+    [MaxLength(200)]
+    public string Pseudonym { get; set; } = string.Empty;
+
+    // name convention -> MultilineText
+    [MaxLength(2000)]
+    public string? Biography { get; set; }
+
+    // [DataType] wins over name -> EmailAddress
+    [DataType(DataType.EmailAddress)]
+    [MaxLength(256)]
+    public string? Email { get; set; }
+
+    // name convention -> Url
+    [MaxLength(500)]
+    public string? Website { get; set; }
+
+    // name convention -> PhoneNumber
+    [MaxLength(50)]
+    public string? Phone { get; set; }
+
+    // explicit [UIHint] beats everything
+    [UIHint("Color")]
+    [MaxLength(7)]
+    public string? BrandColor { get; set; }
+
+    // nullable value type
+    public DateOnly? BornOn { get; set; }
+
+    [NotMapped]
+    public string DisplayLabel => Name;
+
+    public ICollection<Book> Books { get; } = [];
+}
+
+// --- enums, decimals, cascade and restrict, concurrency ---------------------
+
+public enum BookFormat
+{
+    [Display(Name = "Paperback")] Paperback,
+    [Display(Name = "Hardback")] Hardback,
+    [Display(Name = "E-book")] Ebook
+}
+
+public enum ReviewStatus
+{
+    Draft, Submitted, InReview, Approved, Rejected, Withdrawn
+}
+
+public class Book
+{
+    public int BookId { get; set; }
+
+    [MaxLength(300)]
+    public string Title { get; set; } = null!;
+
+    // few members -> RadioGroup
+    public BookFormat Format { get; set; }
+
+    // many members -> Enum, and nullable so it gains an empty option
+    public ReviewStatus? Status { get; set; }
+
+    [Precision(10, 2)]
+    public decimal Price { get; set; }
+
+    [Range(1, 5)]
+    public int Rating { get; set; }
+
+    public bool IsPublished { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime? PublishedAt { get; set; }
+
+    // required navigation -> Create must load the principal
+    public int AuthorId { get; set; }
+    public required Author Author { get; set; }
+
+    // Optional navigation -> nullable dropdown, no principal load.
+    // Guid, because Publisher has a Guid key: the FK type must match the
+    // principal key type or EF rejects the model. Deliberately a different type
+    // from AuthorId so both an int FK and a Guid FK get exercised.
+    public Guid? PublisherId { get; set; }
+    public Publisher? Publisher { get; set; }
+
+    // many-to-many -> CheckboxList plus a save-time diff
+    public ICollection<Genre> Genres { get; } = [];
+
+    // cascade dependents -> the delete page must show a count
+    public ICollection<Review> Reviews { get; } = [];
+
+    // optimistic concurrency
+    [Timestamp]
+    public byte[]? RowVersion { get; set; }
+}
+
+public class Genre
+{
+    public int GenreId { get; set; }
+
+    [MaxLength(80)]
+    public string Name { get; set; } = null!;
+
+    public ICollection<Book> Books { get; } = [];
+}
+
+public class Review
+{
+    public int ReviewId { get; set; }
+
+    [MaxLength(4000)]
+    public string Body { get; set; } = string.Empty;
+
+    [Range(1, 5)]
+    public int Score { get; set; }
+
+    public int BookId { get; set; }
+    public required Book Book { get; set; }
+}
+
+// --- owned type, Guid key, restrict delete ----------------------------------
+
+public class Publisher
+{
+    public Guid PublisherId { get; set; }
+
+    [MaxLength(150)]
+    public string Name { get; set; } = null!;
+
+    // owned -> flattened unless typeMap says otherwise
+    public PostalAddress HeadOffice { get; set; } = new();
+
+    // restrict -> deleting must be blocked, not cascaded
+    public ICollection<Book> Books { get; } = [];
+}
+
+[Owned]
+public class PostalAddress
+{
+    [MaxLength(200)]
+    public string Line1 { get; set; } = string.Empty;
+
+    [MaxLength(200)]
+    public string? Line2 { get; set; }
+
+    [MaxLength(100)]
+    public string City { get; set; } = string.Empty;
+
+    [MaxLength(20)]
+    public string PostalCode { get; set; } = string.Empty;
+
+    [MaxLength(2)]
+    public string CountryCode { get; set; } = "AT";
+}
+
+// --- explicit join entity: composite key made of two foreign keys -----------
+// Distinct from Book.Genres above, which is an IMPLICIT join with no CLR type.
+// Here the key parts ARE the foreign keys and are supplied by the form, not
+// generated by the database.
+
+public class BookAward
+{
+    public int BookId { get; set; }
+    public Book? Book { get; set; }
+
+    public int AwardId { get; set; }
+    public Award? Award { get; set; }
+
+    public int Year { get; set; }
+
+    [MaxLength(200)]
+    public string? Citation { get; set; }
+}
+
+public class Award
+{
+    public int AwardId { get; set; }
+
+    [MaxLength(120)]
+    public string Name { get; set; } = null!;
+
+    public ICollection<BookAward> BookAwards { get; } = [];
+}
+
+// --- composite key ----------------------------------------------------------
+
+public class ShelfPosition
+{
+    public int ShelfId { get; set; }
+
+    public int Slot { get; set; }
+
+    public int BookId { get; set; }
+    public Book? Book { get; set; }
+
+    [MaxLength(50)]
+    public string? Note { get; set; }
+}

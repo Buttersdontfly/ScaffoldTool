@@ -1,0 +1,714 @@
+// Compiled against the TARGET project's EF Core version, not the CLI's.
+// Emits raw facts only -- no naming conventions, no template decisions. The CLI
+// applies hint rules afterwards, so this file stays a pure reader of IModel.
+
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
+
+namespace ScaffoldProbe;
+
+public static class Program
+{
+    public static int Main(string[] args)
+    {
+        try
+        {
+            var options = ProbeArgs.Parse(args);
+            using var context = ContextResolver.Resolve(options);
+
+            var json = ModelWriter.Write(context, options);
+            File.WriteAllText(options.OutputPath, json);
+
+            Console.WriteLine($"scaffold-probe: wrote {options.OutputPath}");
+            return 0;
+        }
+        catch (ProbeException ex)
+        {
+            Console.Error.WriteLine($"scaffold-probe: {ex.Message}");
+            return 2;
+        }
+        catch (Exception ex)
+        {
+            // Full exception, not just the message: an unexpected failure here
+            // is almost always a reflection problem where the stack is the
+            // diagnosis.
+            Console.Error.WriteLine($"scaffold-probe: unexpected failure: {ex}");
+            return 3;
+        }
+    }
+}
+
+public sealed class ProbeException(string message) : Exception(message);
+
+public sealed class ProbeArgs
+{
+    public string AssemblyName { get; init; } = "";
+    public string OutputPath { get; init; } = "raw-model.json";
+    public string? ContextName { get; init; }
+    public string? Provider { get; init; }
+    public string? ConnectionString { get; init; }
+
+    public static ProbeArgs Parse(string[] args)
+    {
+        string? Get(string name)
+        {
+            var i = Array.IndexOf(args, name);
+            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        }
+
+        var assembly = Get("--assembly")
+            ?? throw new ProbeException("--assembly is required.");
+
+        return new ProbeArgs
+        {
+            AssemblyName = assembly,
+            OutputPath = Get("--out") ?? "raw-model.json",
+            ContextName = Get("--context"),
+            Provider = Get("--provider"),
+            ConnectionString = Get("--connection")
+        };
+    }
+}
+
+public static class ContextResolver
+{
+    /// <summary>
+    /// Resolution order, most faithful first:
+    ///   1. IDesignTimeDbContextFactory&lt;T&gt; -- the same hook dotnet-ef uses.
+    ///   2. A provider configured with a dummy connection string.
+    ///
+    /// Step 2 works because building IModel never opens a connection. EF needs a
+    /// provider only so provider-specific conventions and type mappings apply.
+    /// </summary>
+    public static DbContext Resolve(ProbeArgs args)
+    {
+        var assembly = Assembly.Load(new AssemblyName(args.AssemblyName));
+        var contextType = FindContextType(assembly, args.ContextName);
+
+        return TryDesignTimeFactory(assembly, contextType)
+            ?? BuildWithProvider(assembly, contextType, args);
+    }
+
+    /// <summary>
+    /// Assembly.GetTypes() throws ReflectionTypeLoadException if ANY type in the
+    /// assembly fails to load, and takes the whole scan down with it.
+    ///
+    /// This happens routinely: Microsoft.EntityFrameworkCore.Design ships with
+    /// PrivateAssets="all" in the standard template, so a design-time factory
+    /// implementing IDesignTimeDbContextFactory&lt;T&gt; cannot be loaded here even
+    /// though the DbContext next to it loads fine. The types that did load are
+    /// still usable, so they are kept.
+    /// </summary>
+    private static Type[] LoadableTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(t => t is not null).Select(t => t!).ToArray();
+        }
+    }
+
+    private static Type FindContextType(Assembly assembly, string? name)
+    {
+        var candidates = LoadableTypes(assembly)
+            .Where(t => !t.IsAbstract && typeof(DbContext).IsAssignableFrom(t))
+            .ToList();
+
+        if (candidates.Count == 0)
+        {
+            throw new ProbeException($"No DbContext found in {assembly.GetName().Name}.");
+        }
+
+        if (name is not null)
+        {
+            return candidates.FirstOrDefault(t => t.Name == name || t.FullName == name)
+                ?? throw new ProbeException($"DbContext '{name}' not found. Candidates: {string.Join(", ", candidates.Select(c => c.Name))}");
+        }
+
+        if (candidates.Count > 1)
+        {
+            throw new ProbeException(
+                $"Multiple DbContexts found ({string.Join(", ", candidates.Select(c => c.Name))}). Pass --context.");
+        }
+
+        return candidates[0];
+    }
+
+    private static DbContext? TryDesignTimeFactory(Assembly assembly, Type contextType)
+    {
+        // Located by name so the probe does not need a compile-time reference to
+        // Microsoft.EntityFrameworkCore.Design. Projects that run `dotnet ef`
+        // already have it; projects that do not fall through to the provider path.
+        var factoryInterface = Type.GetType(
+            "Microsoft.EntityFrameworkCore.Design.IDesignTimeDbContextFactory`1, Microsoft.EntityFrameworkCore.Design",
+            throwOnError: false);
+
+        if (factoryInterface is null)
+        {
+            return null;
+        }
+
+        var closed = factoryInterface.MakeGenericType(contextType);
+
+        var factoryType = LoadableTypes(assembly)
+            .FirstOrDefault(t => !t.IsAbstract && closed.IsAssignableFrom(t));
+
+        if (factoryType is null)
+        {
+            return null;
+        }
+
+        var factory = Activator.CreateInstance(factoryType)
+            ?? throw new ProbeException($"Could not construct {factoryType.Name}.");
+
+        var create = closed.GetMethod("CreateDbContext")!;
+
+        return (DbContext)create.Invoke(factory, [Array.Empty<string>()])!;
+    }
+
+    private static readonly (string Package, string Extensions, string Method)[] KnownProviders =
+    [
+        ("Microsoft.EntityFrameworkCore.SqlServer", "Microsoft.EntityFrameworkCore.SqlServerDbContextOptionsExtensions", "UseSqlServer"),
+        ("Npgsql.EntityFrameworkCore.PostgreSQL", "Microsoft.EntityFrameworkCore.NpgsqlDbContextOptionsBuilderExtensions", "UseNpgsql"),
+        ("Microsoft.EntityFrameworkCore.Sqlite", "Microsoft.EntityFrameworkCore.SqliteDbContextOptionsBuilderExtensions", "UseSqlite")
+    ];
+
+    private static DbContext BuildWithProvider(Assembly assembly, Type contextType, ProbeArgs args)
+    {
+        var referenced = assembly.GetReferencedAssemblies().Select(a => a.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var provider = KnownProviders.FirstOrDefault(p =>
+            args.Provider is null
+                ? referenced.Contains(p.Package)
+                : p.Package.Contains(args.Provider, StringComparison.OrdinalIgnoreCase));
+
+        if (provider.Package is null)
+        {
+            throw new ProbeException(
+                "No supported EF provider found and no IDesignTimeDbContextFactory. " +
+                "Add a design-time factory, or pass --provider sqlserver|npgsql|sqlite.");
+        }
+
+        var extensionsType = Type.GetType($"{provider.Extensions}, {provider.Package}", throwOnError: false)
+            ?? throw new ProbeException($"Could not load {provider.Extensions}. Is {provider.Package} referenced?");
+
+        var useMethod = extensionsType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .FirstOrDefault(m =>
+                m.Name == provider.Method &&
+                !m.IsGenericMethod &&
+                m.GetParameters().Length >= 2 &&
+                m.GetParameters()[0].ParameterType == typeof(DbContextOptionsBuilder) &&
+                m.GetParameters()[1].ParameterType == typeof(string))
+            ?? throw new ProbeException($"Could not find {provider.Method}(DbContextOptionsBuilder, string).");
+
+        var optionsBuilderType = typeof(DbContextOptionsBuilder<>).MakeGenericType(contextType);
+        var builder = (DbContextOptionsBuilder)Activator.CreateInstance(optionsBuilderType)!;
+
+        // Never opened. Present only so provider conventions load.
+        var connection = args.ConnectionString ?? DummyConnectionFor(provider.Method);
+
+        var parameters = useMethod.GetParameters();
+        var invokeArgs = new object?[parameters.Length];
+        invokeArgs[0] = builder;
+        invokeArgs[1] = connection;
+        for (var i = 2; i < parameters.Length; i++)
+        {
+            invokeArgs[i] = Type.Missing;
+        }
+
+        useMethod.Invoke(null, BindingFlags.OptionalParamBinding, binder: null, parameters: invokeArgs, culture: null);
+
+        // DeclaredOnly is required. DbContextOptionsBuilder<TContext> declares
+        // `new DbContextOptions<TContext> Options` which hides the non-generic
+        // Options on the base class, so an unqualified GetProperty finds both
+        // and throws AmbiguousMatchException.
+        var optionsProperty = optionsBuilderType.GetProperty(
+            "Options",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            ?? throw new ProbeException(
+                $"Could not read Options from {optionsBuilderType.Name}.");
+
+        var options = optionsProperty.GetValue(builder)
+            ?? throw new ProbeException("DbContextOptionsBuilder returned no Options.");
+
+        var ctor = contextType.GetConstructors()
+            .FirstOrDefault(c =>
+            {
+                var p = c.GetParameters();
+                return p.Length == 1 && p[0].ParameterType.IsInstanceOfType(options);
+            })
+            ?? throw new ProbeException(
+                $"{contextType.Name} has no constructor taking DbContextOptions<{contextType.Name}>.");
+
+        return (DbContext)ctor.Invoke([options]);
+    }
+
+    private static string DummyConnectionFor(string method) => method switch
+    {
+        "UseSqlite" => "Data Source=:memory:",
+        "UseNpgsql" => "Host=localhost;Database=scaffold_probe;Username=probe;Password=probe",
+        _ => "Server=(local);Database=ScaffoldProbe;Trusted_Connection=True;TrustServerCertificate=True"
+    };
+}
+
+public static class ModelWriter
+{
+    private static readonly string[] IdentityNamespacePrefixes =
+    [
+        "Microsoft.AspNetCore.Identity",
+        "Microsoft.EntityFrameworkCore"
+    ];
+
+    public static string Write(DbContext context, ProbeArgs args)
+    {
+        var model = context.Model;
+        var contextType = context.GetType();
+
+        var dbSets = contextType.GetProperties()
+            .Where(p => p.PropertyType.IsGenericType &&
+                        p.PropertyType.GetGenericTypeDefinition() == typeof(DbSet<>))
+            .ToDictionary(
+                p => p.PropertyType.GetGenericArguments()[0].FullName!,
+                p => p.Name);
+
+        var entities = new List<object>();
+        var skipped = new List<object>();
+
+        foreach (var entity in model.GetEntityTypes().OrderBy(e => e.ShortName()))
+        {
+            var reason = SkipReason(entity, dbSets);
+
+            if (reason is not null)
+            {
+                skipped.Add(new { entity = entity.ShortName(), clrType = entity.ClrType?.FullName, reason });
+                continue;
+            }
+
+            entities.Add(Describe(entity, dbSets));
+        }
+
+        var payload = new
+        {
+            probeVersion = 1,
+            producedUtc = DateTime.UtcNow,
+            dbContext = contextType.FullName,
+            rootNamespace = RootNamespaceOf(contextType),
+            providerName = context.Database.ProviderName,
+            entities,
+            skipped
+        };
+
+        return JsonSerializer.Serialize(payload, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        });
+    }
+
+    /// <summary>
+    /// Identity, join tables and owned types are excluded as ROOTS. Owned types
+    /// still appear inline on their owner as kind "owned".
+    /// </summary>
+    private static string? SkipReason(IEntityType entity, Dictionary<string, string> dbSets)
+    {
+        if (entity.ClrType is null)
+        {
+            return "shadow entity type (no CLR type)";
+        }
+
+        if (entity.IsOwned())
+        {
+            return "owned type; described inline on its owner";
+        }
+
+        var ns = entity.ClrType.Namespace ?? "";
+
+        if (IdentityNamespacePrefixes.Any(p => ns.StartsWith(p, StringComparison.Ordinal)))
+        {
+            return "ASP.NET Identity infrastructure";
+        }
+
+        if (InheritsIdentityBase(entity.ClrType))
+        {
+            return "derives from an ASP.NET Identity base type";
+        }
+
+        if (!dbSets.ContainsKey(entity.ClrType.FullName!))
+        {
+            return "no DbSet on the context (likely a join or owned type)";
+        }
+
+        if (entity.FindPrimaryKey() is null)
+        {
+            return "no primary key";
+        }
+
+        return null;
+    }
+
+    private static bool InheritsIdentityBase(Type type)
+    {
+        for (var t = type.BaseType; t is not null; t = t.BaseType)
+        {
+            var ns = t.Namespace ?? "";
+            if (ns.StartsWith("Microsoft.AspNetCore.Identity", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static object Describe(IEntityType entity, Dictionary<string, string> dbSets)
+    {
+        var clr = entity.ClrType!;
+        var key = entity.FindPrimaryKey();
+        var defaults = ReadInitializers(clr);
+
+        // EF returns properties alphabetically after the key. Form field order
+        // should follow the class, so declaration order is captured here and
+        // carried through the IR.
+        var declarationOrder = clr
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select((info, index) => (info.Name, index))
+            .ToDictionary(x => x.Name, x => x.index);
+
+        int OrderOf(string name) => declarationOrder.TryGetValue(name, out var i) ? i : int.MaxValue;
+
+        var properties = new List<(int Order, object Value)>();
+
+        foreach (var property in entity.GetProperties().Where(p => p.PropertyInfo is not null))
+        {
+            properties.Add((OrderOf(property.Name), DescribeProperty(entity, property, key, defaults)));
+        }
+
+        foreach (var navigation in entity.GetNavigations())
+        {
+            if (navigation.IsCollection)
+            {
+                properties.Add((OrderOf(navigation.Name), DescribeCollection(navigation)));
+                continue;
+            }
+
+            if (navigation.TargetEntityType.IsOwned())
+            {
+                properties.Add((OrderOf(navigation.Name), DescribeOwned(navigation)));
+            }
+
+            // Reference navigations backed by an FK are described on the FK
+            // property itself, so they are not emitted twice here.
+        }
+
+        // Many-to-many. EF models these as skip navigations over a join entity
+        // that has no DbSet, so they never appear in GetNavigations().
+        foreach (var navigation in entity.GetSkipNavigations())
+        {
+            properties.Add((OrderOf(navigation.Name), DescribeSkipNavigation(navigation)));
+        }
+
+        var ordered = properties
+            .OrderBy(p => p.Order)
+            .Select(p => p.Value)
+            .ToList();
+
+        return new
+        {
+            name = entity.ShortName(),
+            clrType = clr.FullName,
+            @namespace = clr.Namespace,
+            dbSet = dbSets.GetValueOrDefault(clr.FullName!),
+            tableName = entity.GetTableName(),
+            key = key is null ? null : new
+            {
+                properties = key.Properties.Select(p => p.Name).ToArray(),
+                clrType = TypeName(key.Properties[0].ClrType),
+                valueGenerated = key.Properties[0].ValueGenerated.ToString(),
+                isComposite = key.Properties.Count > 1,
+
+                // Per-part types. A composite key has no single type, and the
+                // generator needs each one to build action parameters.
+                parts = key.Properties.Select(p => new
+                {
+                    name = p.Name,
+                    clrType = TypeName(p.ClrType),
+                    valueGenerated = p.ValueGenerated.ToString()
+                }).ToArray()
+            },
+            concurrencyToken = entity.GetProperties().FirstOrDefault(p => p.IsConcurrencyToken)?.Name,
+            candidateDisplayColumns = CandidateDisplayColumns(entity),
+            properties = ordered
+        };
+    }
+
+    private static object DescribeProperty(
+        IEntityType entity,
+        IProperty property,
+        IKey? key,
+        IReadOnlyDictionary<string, object?> defaults)
+    {
+        var info = property.PropertyInfo!;
+        var isKey = key?.Properties.Any(p => p.Name == property.Name) == true;
+        var fk = property.GetContainingForeignKeys().FirstOrDefault();
+
+        object? principal = null;
+        string? navigationName = null;
+        bool navigationRequired = false;
+
+        if (fk is not null)
+        {
+            var target = fk.PrincipalEntityType;
+            var nav = fk.DependentToPrincipal;
+            navigationName = nav?.Name;
+
+            if (nav?.PropertyInfo is not null)
+            {
+                // `required Employee Employee` -- the compiler marks required
+                // members, and it changes how the entity must be constructed.
+                navigationRequired = nav.PropertyInfo
+                    .GetCustomAttribute<RequiredMemberAttribute>() is not null;
+            }
+
+            principal = new
+            {
+                entity = target.ShortName(),
+                clrType = target.ClrType?.FullName,
+                key = fk.PrincipalKey.Properties[0].Name,
+                candidateDisplayColumns = CandidateDisplayColumns(target)
+            };
+        }
+
+        defaults.TryGetValue(property.Name, out var initial);
+
+        return new
+        {
+            name = property.Name,
+            clrType = TypeName(info.PropertyType),
+
+            // A foreign key wins over "key". In an explicit join entity the
+            // composite key parts ARE the foreign keys, and reporting them as
+            // plain keys loses the relationship entirely -- the form then has no
+            // way to set them and EF refuses to save.
+            kind = fk is not null ? "reference" : isKey ? "key" : "scalar",
+
+            // Still part of the key, which changes how it is rendered: chosen on
+            // create, immutable afterwards.
+            isKey,
+            nullable = property.IsNullable,
+            maxLength = property.GetMaxLength(),
+            precision = property.GetPrecision(),
+            scale = property.GetScale(),
+            isConcurrencyToken = property.IsConcurrencyToken,
+            valueGenerated = property.ValueGenerated.ToString(),
+            hasValueConverter = property.GetValueConverter() is not null,
+            isEnum = Nullable.GetUnderlyingType(info.PropertyType)?.IsEnum ?? info.PropertyType.IsEnum,
+            enumMembers = EnumMembers(info.PropertyType),
+            navigation = navigationName,
+            navigationRequired,
+            deleteBehavior = fk?.DeleteBehavior.ToString(),
+            principal,
+
+            // Verbatim attribute facts. Rule application happens in the CLI.
+            attributes = new
+            {
+                display = info.GetCustomAttribute<System.ComponentModel.DataAnnotations.DisplayAttribute>() is { } d
+                    ? new { name = d.GetName(), prompt = d.GetPrompt(), description = d.GetDescription(), order = d.GetOrder() }
+                    : null,
+                uiHint = info.GetCustomAttribute<System.ComponentModel.DataAnnotations.UIHintAttribute>()?.UIHint,
+                dataType = info.GetCustomAttribute<System.ComponentModel.DataAnnotations.DataTypeAttribute>()?.DataType.ToString(),
+                required = info.GetCustomAttribute<System.ComponentModel.DataAnnotations.RequiredAttribute>() is not null,
+                stringLength = info.GetCustomAttribute<System.ComponentModel.DataAnnotations.StringLengthAttribute>()?.MaximumLength,
+                range = info.GetCustomAttribute<System.ComponentModel.DataAnnotations.RangeAttribute>() is { } r
+                    ? new { minimum = r.Minimum?.ToString(), maximum = r.Maximum?.ToString() }
+                    : null
+            },
+
+            // "" for a non-nullable string says an empty value is expected in
+            // practice; null! says the property must be set. The CLI turns this
+            // into a [Required] decision.
+            initializer = initial?.ToString(),
+            initializerKnown = defaults.ContainsKey(property.Name)
+        };
+    }
+
+    private static object DescribeOwned(INavigation navigation) => new
+    {
+        name = navigation.Name,
+        kind = "owned",
+        clrType = navigation.TargetEntityType.ClrType?.FullName,
+        nullable = !navigation.ForeignKey.IsRequiredDependent,
+        ownedProperties = navigation.TargetEntityType.GetProperties()
+            .Where(p => p.PropertyInfo is not null)
+            .Select(p => new
+            {
+                name = p.Name,
+                clrType = TypeName(p.PropertyInfo!.PropertyType),
+                nullable = p.IsNullable,
+                maxLength = p.GetMaxLength()
+            })
+            .ToArray()
+    };
+
+    private static object DescribeCollection(INavigation navigation) => new
+    {
+        name = navigation.Name,
+        kind = "collection",
+        clrType = navigation.TargetEntityType.ClrType?.FullName,
+        targetEntity = navigation.TargetEntityType.ShortName(),
+        isSkipNavigation = false,
+
+        // Cascade means deleting the principal silently deletes every one of
+        // these rows. The confirmation page has to say so, which means the CLI
+        // needs the behaviour and the dependent's FK.
+        deleteBehavior = navigation.ForeignKey.DeleteBehavior.ToString(),
+        foreignKey = navigation.ForeignKey.Properties[0].Name,
+
+        // `ICollection<Activity> Activities { get; }` has no setter, so it can
+        // never be bound from a form. The CLI marks it details-only.
+        hasSetter = navigation.PropertyInfo?.SetMethod is not null
+    };
+
+    private static object DescribeSkipNavigation(ISkipNavigation navigation) => new
+    {
+        name = navigation.Name,
+        kind = "manyToMany",
+        clrType = navigation.TargetEntityType.ClrType?.FullName,
+        targetEntity = navigation.TargetEntityType.ShortName(),
+        isSkipNavigation = true,
+        joinEntity = navigation.JoinEntityType?.ShortName(),
+        targetKey = navigation.TargetEntityType.FindPrimaryKey()?.Properties[0].Name,
+
+        // The id list posted back is typed by the TARGET's key, not by anything
+        // on this entity.
+        targetKeyClrType = navigation.TargetEntityType.FindPrimaryKey() is { } key
+            ? TypeName(key.Properties[0].ClrType)
+            : "int",
+        targetDbSet = navigation.TargetEntityType.ShortName() + "s",
+        candidateDisplayColumns = CandidateDisplayColumns(navigation.TargetEntityType),
+        hasSetter = navigation.PropertyInfo?.SetMethod is not null
+    };
+
+    /// <summary>
+    /// Ranked guesses for the label shown in a dropdown. The CLI picks the first
+    /// and records that it was a guess, so a wrong pick is a one-line fix.
+    /// </summary>
+    private static string[] CandidateDisplayColumns(IEntityType entity)
+    {
+        var preferred = new[] { "Name", "Title", "DisplayName", "Description", "Code" };
+
+        var stringProps = entity.GetProperties()
+            .Where(p => p.ClrType == typeof(string))
+            .Select(p => p.Name)
+            .ToList();
+
+        return preferred.Where(stringProps.Contains)
+            .Concat(stringProps.Where(p => !preferred.Contains(p)))
+            .ToArray();
+    }
+
+    private static object[]? EnumMembers(Type type)
+    {
+        var enumType = Nullable.GetUnderlyingType(type) ?? type;
+
+        if (!enumType.IsEnum)
+        {
+            return null;
+        }
+
+        return Enum.GetNames(enumType).Select(object (n) =>
+        {
+            var member = enumType.GetField(n);
+            var display = member?.GetCustomAttribute<System.ComponentModel.DataAnnotations.DisplayAttribute>();
+
+            return new
+            {
+                name = n,
+                value = Convert.ToInt64(Enum.Parse(enumType, n)),
+                display = display?.GetName()
+            };
+        }).ToArray();
+    }
+
+    /// <summary>
+    /// Reads property initializers by constructing the entity. Entities with
+    /// required members cannot be constructed reflectively, so this returns an
+    /// empty map for them and the CLI falls back to the EF nullability answer.
+    /// </summary>
+    private static IReadOnlyDictionary<string, object?> ReadInitializers(Type clr)
+    {
+        try
+        {
+            var instance = Activator.CreateInstance(clr, nonPublic: true);
+
+            if (instance is null)
+            {
+                return new Dictionary<string, object?>();
+            }
+
+            return clr.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+                .ToDictionary(p => p.Name, p =>
+                {
+                    try { return p.GetValue(instance); }
+                    catch { return null; }
+                });
+        }
+        catch
+        {
+            return new Dictionary<string, object?>();
+        }
+    }
+
+    private static string TypeName(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type);
+
+        if (underlying is not null)
+        {
+            return $"{TypeName(underlying)}?";
+        }
+
+        if (type.IsGenericType)
+        {
+            var args = string.Join(", ", type.GetGenericArguments().Select(TypeName));
+            return $"{type.Name[..type.Name.IndexOf('`')]}<{args}>";
+        }
+
+        // Short names for everything the rules match on. Emitting
+        // "System.DateTime" here while rules.json keys on "DateTime" silently
+        // disables every date rule, so normalisation happens once, here.
+        return type == typeof(int) ? "int"
+            : type == typeof(long) ? "long"
+            : type == typeof(short) ? "short"
+            : type == typeof(byte) ? "byte"
+            : type == typeof(bool) ? "bool"
+            : type == typeof(string) ? "string"
+            : type == typeof(decimal) ? "decimal"
+            : type == typeof(double) ? "double"
+            : type == typeof(float) ? "float"
+            : type == typeof(byte[]) ? "byte[]"
+            : type == typeof(DateTime) ? "DateTime"
+            : type == typeof(DateOnly) ? "DateOnly"
+            : type == typeof(TimeOnly) ? "TimeOnly"
+            : type == typeof(TimeSpan) ? "TimeSpan"
+            : type == typeof(DateTimeOffset) ? "DateTimeOffset"
+            : type == typeof(Guid) ? "Guid"
+            : type.Namespace == "System" ? type.Name
+            : type.FullName ?? type.Name;
+    }
+
+    private static string RootNamespaceOf(Type contextType)
+    {
+        var ns = contextType.Namespace ?? "";
+        var parts = ns.Split('.');
+
+        // Zeiterfassung.Data.AppDbContext -> Zeiterfassung
+        return parts.Length > 1 ? parts[0] : ns;
+    }
+}

@@ -1,0 +1,125 @@
+{
+  "$comment": [
+    "Rules are applied in order; the first match wins, and a property that",
+    "matches nothing falls through to its type-name template. Edit freely --",
+    "`scaffold eject-rules` copies this file next to model.json so the tool",
+    "reads yours instead of the built-in one.",
+    "",
+    "A rule only takes effect if its template actually exists in",
+    "Views/Shared/EditorTemplates. Otherwise the property degrades to its type",
+    "template and gets a TODO comment, so an unknown shape never blocks output."
+  ],
+
+  "precedence": [
+    "override",
+    "attribute",
+    "structural",
+    "nameConvention",
+    "typeName"
+  ],
+
+  "attributeRules": [
+    { "when": { "uiHint": "*" }, "template": "$uiHint", "note": "explicit [UIHint] always wins" },
+    { "when": { "dataType": "EmailAddress" }, "template": "EmailAddress" },
+    { "when": { "dataType": "Password" }, "template": "Password" },
+    { "when": { "dataType": "Url" }, "template": "Url" },
+    { "when": { "dataType": "PhoneNumber" }, "template": "PhoneNumber" },
+    { "when": { "dataType": "MultilineText" }, "template": "MultilineText" }
+  ],
+
+  "structuralRules": [
+    {
+      "when": { "kind": "reference" },
+      "template": "Dropdown",
+      "emits": "itemsProvider",
+      "note": "foreign key scalar; items come from the principal entity"
+    },
+    {
+      "when": { "isEnum": true, "enumMemberCountAtMost": 4 },
+      "template": "RadioGroup",
+      "note": "few members read better as radios than a select"
+    },
+    { "when": { "isEnum": true }, "template": "Enum" },
+    { "when": { "clrType": "IFormFile" }, "template": "FileUpload" },
+    { "when": { "clrType": "List<string>" }, "template": "Tags" },
+    { "when": { "kind": "collection", "hasSetter": false }, "template": null, "include": "detailsOnly" }
+  ],
+
+  "nameConventionRules": [
+    { "when": { "clrType": "string", "nameMatches": "(?i)email" }, "template": "EmailAddress" },
+    { "when": { "clrType": "string", "nameMatches": "(?i)password" }, "template": "Password" },
+    { "when": { "clrType": "string", "nameMatches": "(?i)(url|website|homepage)$" }, "template": "Url" },
+    { "when": { "clrType": "string", "nameMatches": "(?i)(phone|mobile|tel)" }, "template": "PhoneNumber" },
+    { "when": { "clrType": "string", "nameMatches": "(?i)colou?r$" }, "template": "Color" },
+    { "when": { "clrType": "string", "nameMatches": "(?i)username|login" }, "template": "UserName" },
+
+    {
+      "$comment": [
+        "Multiline needs BOTH a suggestive name and a real length, or an",
+        "explicit long length. An unbounded string is NOT enough: Activity.Title",
+        "has no configured length and maps to nvarchar(max), and a textarea",
+        "would be wrong for it."
+      ],
+      "when": { "clrType": "string", "nameMatches": "(?i)(description|notes?|comments?|remarks?|body|content)" },
+      "template": "MultilineText"
+    },
+    { "when": { "clrType": "string", "maxLengthAtLeast": 512 }, "template": "MultilineText" },
+
+    { "when": { "clrType": "int", "nameMatches": "(?i)^rating$", "hasRange": true }, "template": "Rating" }
+  ],
+
+  "requiredness": {
+    "$comment": [
+      "A non-nullable string is IsRequired in EF regardless of its initializer,",
+      "but the initializer says what the developer meant. `= null!` means the",
+      "value must be supplied; `= string.Empty` means empty is expected in",
+      "practice, so forcing [Required] on the form would be wrong."
+    ],
+    "emitRequiredWhenInitializerIs": ["null", "unknown"],
+    "skipRequiredWhenInitializerIs": ["", "empty"]
+  },
+
+  "search": {
+    "$comment": "Maps a property to a search operator. Each operator renders on templates that already exist.",
+    "byKind": {
+      "key": { "enabled": false },
+      "reference": { "operator": "equals", "template": "Dropdown" },
+      "collection": { "enabled": false }
+    },
+    "byClrType": {
+      "string": { "enabled": true, "operator": "contains", "template": "String" },
+      "bool": {
+        "enabled": true,
+        "operator": "choice",
+        "template": "RadioGroup",
+        "choices": [
+          { "value": "", "text": "Any" },
+          { "value": "true", "text": "Yes" },
+          { "value": "false", "text": "No" }
+        ],
+        "note": "string? rather than bool?: Boolean.cshtml is a two-state switch and cannot express Any. Defaults to string.Empty so Any is pre-checked."
+      },
+      "int": { "enabled": true, "operator": "range" },
+      "long": { "enabled": true, "operator": "range" },
+      "decimal": { "enabled": true, "operator": "range" },
+      "double": { "enabled": true, "operator": "range" },
+      "DateTime": { "enabled": true, "operator": "range" },
+      "DateOnly": { "enabled": true, "operator": "range" },
+      "TimeOnly": { "enabled": true, "operator": "range" }
+    },
+    "enumOperator": { "operator": "equals", "template": "Enum" },
+    "maxSearchableProperties": 10
+  },
+
+  "index": {
+    "defaultPageSize": 25,
+    "maxListColumns": 7,
+    "excludeFromListTemplates": ["MultilineText", "Password", "FileUpload"]
+  },
+
+  "items": {
+    "defaultStrategy": "dropdown",
+    "displayColumnPreference": ["Name", "Title", "DisplayName", "Description", "Code"],
+    "$comment": "There is no way to know row counts at generation time. Set strategy to \"input\" per property for large lookup tables."
+  }
+}

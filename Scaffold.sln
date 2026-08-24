@@ -1,0 +1,33 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35222.181
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Scaffold", "Scaffold\Scaffold.csproj", "{3F5A1C42-8E1B-4D77-9C0E-2B4A6D91E7A3}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Scaffold.TestModel", "Scaffold.TestModel\Scaffold.TestModel.csproj", "{7B2E4D91-3C6A-4F18-A5D2-8E4C1B9076FA}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Scaffold.Tests", "Scaffold.Tests\Scaffold.Tests.csproj", "{C41A9F73-52B8-4E60-9D17-6A3F8C2E5B4D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3F5A1C42-8E1B-4D77-9C0E-2B4A6D91E7A3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3F5A1C42-8E1B-4D77-9C0E-2B4A6D91E7A3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3F5A1C42-8E1B-4D77-9C0E-2B4A6D91E7A3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3F5A1C42-8E1B-4D77-9C0E-2B4A6D91E7A3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7B2E4D91-3C6A-4F18-A5D2-8E4C1B9076FA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7B2E4D91-3C6A-4F18-A5D2-8E4C1B9076FA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7B2E4D91-3C6A-4F18-A5D2-8E4C1B9076FA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7B2E4D91-3C6A-4F18-A5D2-8E4C1B9076FA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C41A9F73-52B8-4E60-9D17-6A3F8C2E5B4D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C41A9F73-52B8-4E60-9D17-6A3F8C2E5B4D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C41A9F73-52B8-4E60-9D17-6A3F8C2E5B4D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C41A9F73-52B8-4E60-9D17-6A3F8C2E5B4D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

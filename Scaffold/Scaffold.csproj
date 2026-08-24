@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Scaffold</RootNamespace>
+    <AssemblyName>scaffold</AssemblyName>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>scaffold</ToolCommandName>
+    <PackageOutputPath>./nupkg</PackageOutputPath>
+
+    <Version>0.7.0</Version>
+
+    <PackageId>StarterAspMVCEditorTemplates.ScaffoldTool</PackageId>
+    <Title>Scaffold Tool for StarterAspMVCEditorTemplates</Title>
+    <Authors>Buttersdontfly</Authors>
+    <Description>CRUD generation for ASP.NET Core MVC projects built on the StarterAspMVCEditorTemplates editor templates. Reads EF Core's model and emits annotated ViewModels, controllers and views that render through the templates you already have, rather than writing raw input markup. Requires a project containing Views/Shared/EditorTemplates from StarterAspMVCEditorTemplates.</Description>
+    <PackageTags>aspnetcore;mvc;scaffolding;codegen;entity-framework-core;editortemplates;dotnet-tool</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/Buttersdontfly/ScaffoldTool</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Buttersdontfly/ScaffoldTool</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <EmbeddedResourceUseDependentUponConvention>false</EmbeddedResourceUseDependentUponConvention>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Scriban" Version="7.2.6" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="PACKAGE.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Templates\*.scriban">
+      <LogicalName>Scaffold.Templates.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Probe\ProbeProgram.txt" LogicalName="Scaffold.Probe.ProbeProgram.txt" />
+    <EmbeddedResource Include="Probe\ProbeProject.txt" LogicalName="Scaffold.Probe.ProbeProject.txt" />
+    <EmbeddedResource Include="rules.json" LogicalName="Scaffold.rules.json" />
+  </ItemGroup>
+
+  <Target Name="VerifyEmbeddedSources" BeforeTargets="BeforeBuild">
+    <ItemGroup>
+      <ExpectedTemplate Include="Templates\Controller.scriban" />
+      <ExpectedTemplate Include="Templates\ViewForm.scriban" />
+      <ExpectedTemplate Include="Templates\ViewIndex.scriban" />
+      <ExpectedTemplate Include="Templates\ViewDetails.scriban" />
+      <ExpectedTemplate Include="Templates\ViewDelete.scriban" />
+      <ExpectedTemplate Include="Templates\ViewModelForm.scriban" />
+      <ExpectedTemplate Include="Templates\ViewModelListItem.scriban" />
+      <ExpectedTemplate Include="Templates\ViewModelDetails.scriban" />
+      <ExpectedTemplate Include="Templates\ViewModelSearch.scriban" />
+      <ExpectedTemplate Include="Templates\ViewModelIndex.scriban" />
+      <ExpectedTemplate Include="Probe\ProbeProgram.txt" />
+      <ExpectedTemplate Include="Probe\ProbeProject.txt" />
+      <ExpectedTemplate Include="rules.json" />
+    </ItemGroup>
+
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\%(ExpectedTemplate.Identity)')"
+           Text="Missing embedded source: %(ExpectedTemplate.Identity). Every template and probe file must be present or the tool fails at run time instead of at build time." />
+  </Target>
+
+</Project>

@@ -1,0 +1,10 @@
+bin/
+obj/
+nupkg/
+.vs/
+
+# Written by a failing golden test for diffing; never committed.
+*.actual
+
+# CI pack output
+artifacts/
